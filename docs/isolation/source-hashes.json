@@ -7,7 +7,7 @@
     "package.json": "0651a4c88533099fc9d432030cdff264774fea7bee8a8f5a8b12d58378ff9953",
     "packaging/app.ico": "027e3644acfa9e16fd6d23771ea8d45e447559fb2e79d2574b519c0d3e538b12",
     "packaging/build-portable.mjs": "6c34f2baa353633a0425bee6200a6134de229c378621841f45dad33d533eb1cd",
-    "packaging/launcher/Launcher.cs": "17de018fc772fabd0e866abbcd6f9ef76971ffa8fe259aa23016910fb16e0a32",
+    "packaging/launcher/Launcher.cs": "2429aaf7e1be565d7e9196678a45ec1710df18823e9b2c21a9f3f31d5dc3aef1",
     "packaging/make-ico.mjs": "3cb4430ea7cb31c228400bb7801593f605e720336c84218ffe77b13cc90ac9db",
     "packaging/server.mjs": "aeb0ae3324ce67f71fb9c118a8998e9b8dffe14191f1cbd5115c410efb38968c",
     "packaging/server/StaticServer.cs": "2aa5a3518954c1d9b2039b9b070d314138db8fd50c909c64a92ea6e0e6d78df5",

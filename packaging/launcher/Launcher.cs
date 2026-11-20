@@ -4,10 +4,12 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 internal static class Launcher
 {
@@ -16,6 +18,17 @@ internal static class Launcher
 
     private static readonly string BaseDir = AppDomain.CurrentDomain.BaseDirectory;
     private static readonly string StateDir = ResolveStateDir();
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
     private static string PidFile
     {
@@ -89,7 +102,12 @@ internal static class Launcher
             if (existing != null && ProcessAlive(existing.Pid))
             {
                 Trace("服务已在运行：端口 " + existing.Port);
-                OpenBrowser(UrlOf(existing.Port));
+                string runningUrl = UrlOf(existing.Port);
+                if (!OpenBrowser(runningUrl))
+                {
+                    Trace("自动打开浏览器失败，显示地址提示窗");
+                    ShowOpenPrompt(runningUrl);
+                }
                 return 0;
             }
 
@@ -113,7 +131,12 @@ internal static class Launcher
             }
 
             Trace("服务就绪：端口 " + ready.Port);
-            OpenBrowser(UrlOf(ready.Port));
+            string readyUrl = UrlOf(ready.Port);
+            if (!OpenBrowser(readyUrl))
+            {
+                Trace("自动打开浏览器失败，显示地址提示窗");
+                ShowOpenPrompt(readyUrl);
+            }
             return 0;
         }
         catch (Exception error)
@@ -252,17 +275,286 @@ internal static class Launcher
         return "http://127.0.0.1:" + port.ToString() + "/";
     }
 
-    private static void OpenBrowser(string url)
+    /// <summary>
+    /// 打开浏览器：先按默认浏览器注册项显式启动（Chromium 系加 --new-window），
+    /// 再退回 ShellExecute / explorer；每一步都用「窗口标题里出现 日程轻量版」确认成功。
+    /// 全部失败返回 false，由调用方弹出带链接的提示窗。
+    /// </summary>
+    private static bool OpenBrowser(string url)
     {
+        // 先记录已有的同名窗口：只有「新出现的窗口」才算本次打开成功，
+        // 否则用户桌面上本来开着的页面会让失败被误判成成功。
+        System.Collections.Generic.HashSet<IntPtr> before = SnapshotAppWindows();
         try
         {
-            ProcessStartInfo info = new ProcessStartInfo(url);
-            info.UseShellExecute = true;
-            Process.Start(info);
+            string browser = DefaultBrowserExe();
+            Trace("默认浏览器：" + (string.IsNullOrEmpty(browser) ? "(未识别)" : browser));
+            if (!string.IsNullOrEmpty(browser) && File.Exists(browser))
+            {
+                string lower = browser.ToLowerInvariant();
+                bool chromium =
+                    lower.EndsWith("chrome.exe", StringComparison.Ordinal)
+                    || lower.EndsWith("msedge.exe", StringComparison.Ordinal)
+                    || lower.EndsWith("brave.exe", StringComparison.Ordinal);
+                string arguments = chromium ? "--new-window \"" + url + "\"" : "\"" + url + "\"";
+                ProcessStartInfo explicitStart = new ProcessStartInfo(browser, arguments);
+                explicitStart.UseShellExecute = true;
+                explicitStart.WorkingDirectory = BaseDir;
+                Process started = Process.Start(explicitStart);
+                Trace(
+                    "已请求浏览器："
+                        + browser
+                        + "（"
+                        + (started == null ? "无进程" : started.HasExited ? "退出码 " + started.ExitCode : "运行中")
+                        + "）"
+                );
+                if (WaitForAppWindow(4, before))
+                {
+                    Trace("已通过默认浏览器打开");
+                    return true;
+                }
+                Trace("4 秒内没看到浏览器窗口");
+            }
         }
         catch (Exception error)
         {
-            Fail("服务已启动，但未能自动打开浏览器。\n\n请手动访问：" + url + "\n\n" + error.Message);
+            Trace("显式启动浏览器失败：" + error.Message);
+        }
+
+        try
+        {
+            ProcessStartInfo shell = new ProcessStartInfo(url);
+            shell.UseShellExecute = true;
+            Process.Start(shell);
+            Trace("已通过 ShellExecute 请求打开浏览器");
+            if (WaitForAppWindow(4, before))
+            {
+                return true;
+            }
+            Trace("ShellExecute 后 4 秒内没看到窗口");
+        }
+        catch (Exception error)
+        {
+            Trace("ShellExecute 打开失败：" + error.Message);
+        }
+
+        try
+        {
+            Process.Start("explorer.exe", "\"" + url + "\"");
+            Trace("已通过 explorer 打开");
+            if (WaitForAppWindow(4, before))
+            {
+                return true;
+            }
+            Trace("explorer 后 4 秒内没看到窗口");
+        }
+        catch (Exception error)
+        {
+            Trace("explorer 打开失败：" + error.Message);
+        }
+
+        return false;
+    }
+
+    /// <summary>轮询等待标题含「日程轻量版」且不在 before 里的可见窗口出现。</summary>
+    private static bool WaitForAppWindow(int seconds, System.Collections.Generic.HashSet<IntPtr> before)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (HasAppWindow(before))
+            {
+                return true;
+            }
+            Thread.Sleep(250);
+        }
+        return false;
+    }
+
+    private static System.Collections.Generic.HashSet<IntPtr> SnapshotAppWindows()
+    {
+        System.Collections.Generic.HashSet<IntPtr> handles = new System.Collections.Generic.HashSet<IntPtr>();
+        try
+        {
+            EnumWindows(
+                delegate(IntPtr handle, IntPtr parameter)
+                {
+                    if (IsWindowVisible(handle) && TitleOf(handle).IndexOf(AppTitle, StringComparison.Ordinal) >= 0)
+                    {
+                        handles.Add(handle);
+                    }
+                    return true;
+                },
+                IntPtr.Zero
+            );
+        }
+        catch
+        {
+            // 枚举失败按空集合处理
+        }
+        return handles;
+    }
+
+    private static bool HasAppWindow(System.Collections.Generic.HashSet<IntPtr> before)
+    {
+        bool found = false;
+        try
+        {
+            EnumWindows(
+                delegate(IntPtr handle, IntPtr parameter)
+                {
+                    if (!IsWindowVisible(handle) || before.Contains(handle))
+                    {
+                        return true;
+                    }
+                    if (TitleOf(handle).IndexOf(AppTitle, StringComparison.Ordinal) >= 0)
+                    {
+                        found = true;
+                        return false;
+                    }
+                    return true;
+                },
+                IntPtr.Zero
+            );
+        }
+        catch
+        {
+            // 枚举失败按「没看到窗口」处理
+        }
+        return found;
+    }
+
+    private static string TitleOf(IntPtr handle)
+    {
+        try
+        {
+            StringBuilder title = new StringBuilder(512);
+            GetWindowText(handle, title, title.Capacity);
+            return title.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>从注册表读默认浏览器的可执行文件路径（读不到返回 null，不抛异常）。</summary>
+    private static string DefaultBrowserExe()
+    {
+        try
+        {
+            using (
+                RegistryKey choice = Registry.CurrentUser.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice"
+                )
+            )
+            {
+                string progId = choice == null ? null : choice.GetValue("ProgId") as string;
+                if (string.IsNullOrEmpty(progId))
+                {
+                    return null;
+                }
+                using (RegistryKey command = Registry.ClassesRoot.OpenSubKey(progId + @"\shell\open\command"))
+                {
+                    string raw = command == null ? null : command.GetValue(null) as string;
+                    if (string.IsNullOrEmpty(raw))
+                    {
+                        return null;
+                    }
+                    raw = raw.Trim();
+                    if (raw.StartsWith("\"", StringComparison.Ordinal))
+                    {
+                        int end = raw.IndexOf('"', 1);
+                        return end > 1 ? raw.Substring(1, end - 1) : null;
+                    }
+                    int space = raw.IndexOf(' ');
+                    return space > 0 ? raw.Substring(0, space) : raw;
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 自动打开浏览器失败时的兜底：小窗口里给出可点击地址与「复制地址」，
+    /// 让用户不查日志也能一步打开页面。
+    /// </summary>
+    private static void ShowOpenPrompt(string url)
+    {
+        Trace("准备显示地址提示窗");
+        try
+        {
+            ShowOpenPromptCore(url);
+            Trace("地址提示窗已关闭");
+        }
+        catch (Exception error)
+        {
+            Trace("地址提示窗失败：" + error);
+            Fail("本地服务已启动，但没能自动打开浏览器。\n\n请手动访问：" + url);
+        }
+    }
+
+    private static void ShowOpenPromptCore(string url)
+    {
+        using (Form form = new Form())
+        {
+            form.Text = AppTitle + " · 服务已就绪";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.StartPosition = FormStartPosition.CenterScreen;
+            form.TopMost = true;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.Width = 470;
+            form.Height = 200;
+
+            Label hint = new Label();
+            hint.Text = "本地服务已启动，但没能自动打开浏览器。请点击下面的地址：";
+            hint.SetBounds(14, 14, 430, 36);
+            form.Controls.Add(hint);
+
+            LinkLabel link = new LinkLabel();
+            link.Text = url;
+            link.SetBounds(14, 56, 430, 24);
+            link.LinkClicked += delegate
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                }
+                catch
+                {
+                    // 用户还可以复制地址手动粘贴
+                }
+            };
+            form.Controls.Add(link);
+
+            Button copy = new Button();
+            copy.Text = "复制地址";
+            copy.SetBounds(14, 100, 100, 30);
+            copy.Click += delegate
+            {
+                try
+                {
+                    Clipboard.SetText(url);
+                }
+                catch
+                {
+                    // 忽略
+                }
+            };
+            form.Controls.Add(copy);
+
+            Button close = new Button();
+            close.Text = "关闭";
+            close.SetBounds(350, 100, 94, 30);
+            close.Click += delegate { form.Close(); };
+            form.Controls.Add(close);
+            form.AcceptButton = close;
+
+            form.ShowDialog();
         }
     }
 
