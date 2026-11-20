@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.npm-cache/
+.npmrc
+.tmp/
+.vite/
+release/
+packaging/app.ico
+*.local
+npm-debug.log*
+.DS_Store
