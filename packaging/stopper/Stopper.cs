@@ -1,5 +1,5 @@
 // 日程轻量版 · 停止服务
-// 双击后：结束由「日程轻量版.exe」启动的本地服务进程（不影响其他 Node 程序）。
+// 双击后：结束由「日程轻量版.exe」启动的本地服务进程（兼容内置服务与旧版 Node 两种包）。
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -56,7 +56,7 @@ internal static class Stopper
         try
         {
             int? pid = ReadPid();
-            if (pid != null && KillNode(pid.Value))
+            if (pid != null && KillService(pid.Value))
             {
                 stopped++;
                 report.AppendLine("已停止记录在案的进程（PID " + pid.Value + "）。");
@@ -123,12 +123,16 @@ internal static class Stopper
         }
     }
 
-    private static bool KillNode(int pid)
+    private static bool KillService(int pid)
     {
         try
         {
             Process process = Process.GetProcessById(pid);
-            if (!string.Equals(process.ProcessName, "node", StringComparison.OrdinalIgnoreCase))
+            string name = process.ProcessName;
+            if (
+                !string.Equals(name, "node", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(name, "ScheduleServer", StringComparison.OrdinalIgnoreCase)
+            )
             {
                 return false;
             }
@@ -142,21 +146,30 @@ internal static class Stopper
         }
     }
 
-    /// <summary>兜底：找出命令行里带 server.mjs 的 node 进程。</summary>
+    /// <summary>兜底：找出命令行里带 server.mjs 的 node 进程，或带 ScheduleServer 的服务进程。</summary>
     private static int KillByCommandLine()
+    {
+        int killed = 0;
+        killed += KillMatching("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'", "server.mjs");
+        killed += KillMatching(
+            "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'ScheduleServer.exe'",
+            "--port"
+        );
+        return killed;
+    }
+
+    private static int KillMatching(string query, string marker)
     {
         int killed = 0;
         try
         {
-            ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'"
-            );
+            ManagementObjectSearcher searcher = new ManagementObjectSearcher(query);
             foreach (ManagementObject item in searcher.Get())
             {
                 try
                 {
                     string commandLine = Convert.ToString(item["CommandLine"]);
-                    if (commandLine == null || commandLine.IndexOf("server.mjs", StringComparison.OrdinalIgnoreCase) < 0)
+                    if (commandLine == null || commandLine.IndexOf(marker, StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         continue;
                     }

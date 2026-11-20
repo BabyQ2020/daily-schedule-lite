@@ -65,20 +65,25 @@ internal static class Launcher
         Trace("启动器开始");
         try
         {
+            string serverExe = Path.Combine(BaseDir, "ScheduleServer.exe");
             string nodeExe = Path.Combine(BaseDir, "runtime", "node.exe");
             string startScript = Path.Combine(BaseDir, "runtime", "start.cmd");
             string serverScript = Path.Combine(BaseDir, "server.mjs");
 
-            if (!File.Exists(nodeExe) || !File.Exists(startScript) || !File.Exists(serverScript))
+            bool dotnetMode = File.Exists(serverExe);
+            bool legacyMode = File.Exists(nodeExe) && File.Exists(startScript) && File.Exists(serverScript);
+            if (!dotnetMode && !legacyMode)
             {
                 Fail(
-                    "便携包不完整：缺少 runtime\\node.exe、runtime\\start.cmd 或 server.mjs。\n\n"
+                    "便携包不完整：缺少 ScheduleServer.exe（或旧版的 runtime\\node.exe、start.cmd、server.mjs）。\n\n"
                         + "请解压整个文件夹后再双击 exe，不要只把 exe 单独复制出来。"
                 );
                 return 1;
             }
 
-            Trace("便携包文件齐全；状态目录：" + StateDir);
+            Trace(
+                "便携包文件齐全（" + (dotnetMode ? "内置服务" : "Node 运行时") + "）；状态目录：" + StateDir
+            );
 
             Startup existing = ReadStartup();
             if (existing != null && ProcessAlive(existing.Pid))
@@ -90,8 +95,8 @@ internal static class Launcher
 
             TrimLog();
             TryDelete(PidFile);
-            StartServer(startScript);
-            Trace("已启动 start.cmd");
+            StartServer(dotnetMode, serverExe, startScript);
+            Trace("已启动本地服务进程");
 
             Startup ready = WaitForReady(ReadinessSeconds);
             if (ready == null)
@@ -141,16 +146,36 @@ internal static class Launcher
         }
     }
 
-    private static void StartServer(string startScript)
+    private static void StartServer(bool dotnetMode, string serverExe, string startScript)
     {
-        // 用 ShellExecute + cmd /c 启动：子进程不会继承本进程的句柄，也不会闪窗。
-        ProcessStartInfo info = new ProcessStartInfo(
-            Path.Combine(Environment.SystemDirectory, "cmd.exe"),
-            "/c \"\"" + startScript + "\"\""
-        );
+        ProcessStartInfo info;
+        if (dotnetMode)
+        {
+            // 直接 CreateProcess 启动控制台服务：不走 ShellExecute，避免「打开文件 - 安全警告」
+            // 之类的外壳对话框，也不会把调用方的控制台句柄挂住；CreateNoWindow 保证不闪窗。
+            string arguments =
+                "--root \""
+                + Path.Combine(BaseDir, "runtime", "web")
+                + "\" --port 4180 --pid-file \""
+                + PidFile
+                + "\" --log-file \""
+                + LogFile
+                + "\"";
+            info = new ProcessStartInfo(serverExe, arguments);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+        }
+        else
+        {
+            // Node 版仍走 ShellExecute + cmd：让子进程脱离本进程句柄，批处理窗口隐藏。
+            info = new ProcessStartInfo(
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                "/c \"\"" + startScript + "\"\""
+            );
+            info.UseShellExecute = true;
+            info.WindowStyle = ProcessWindowStyle.Hidden;
+        }
         info.WorkingDirectory = BaseDir;
-        info.UseShellExecute = true;
-        info.WindowStyle = ProcessWindowStyle.Hidden;
         Process.Start(info);
     }
 
