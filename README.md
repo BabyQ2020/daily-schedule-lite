@@ -2,7 +2,9 @@
 
 单用户、本地优先、离线可用的网页端日程工具。左侧是按周查看的普通日程（顶部周条可用 `‹ ›` 前后翻周、也可直接跳转日期），右侧是长期/周期任务规则；所有数据保存在本机 IndexedDB，不上传、不联网。
 
-> 当前状态：V1.0 开发中（P3.2 收尾）。双栏界面、长期任务规则与单次例外均已接入，正在做验收与打包。
+> 当前状态：V1.0 可交付（2026-11-21）。双栏界面、长期任务规则/单次例外、备份恢复、诊断与救援工具、方案 A 便携包均已完成。
+>
+> **接手开发请先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)**：里面有环境、构建、改版流程、数据模型、排错与已知限制。
 
 ## 技术栈
 
@@ -29,7 +31,9 @@ npm run check          # typecheck + lint + test
 npm run format:check   # 只检查格式，不写文件
 npm run isolation:check    # 新旧工程隔离检查 + 源码哈希基线比对
 npm run isolation:baseline # 重建哈希基线（确认改动都是自己做的之后）
-npm run package        # 打 Windows 便携版（需先 build）
+npm run package        # 打 Windows 便携版（方案 A：内置 .NET 服务，约 1.75 MB）
+npm run package:node   # 同上，但内置 Node 运行时不依赖 .NET（约 97 MB，老系统兜底）
+npm run package:full   # 先 build 再打方案 A 包
 ```
 
 ## 目录结构
@@ -49,9 +53,25 @@ Work_Lite_version1.0/
 │  ├─ styles/              # 全局样式
 │  └─ test/                # 测试环境与工具
 ├─ scripts/                # 构建、校验、离线检查、隔离检查脚本
-├─ packaging/              # Windows 便携版启动器与服务脚本
-├─ docs/                   # 运维手册、验收记录、隔离基线
+├─ packaging/              # 便携版：C# 静态服务、启动器、停止服务、打包脚本
+│  ├─ build-portable.mjs   # 打包入口（--server dotnet|node、--out <dir>）
+│  ├─ server/StaticServer.cs  # 方案 A：只监听 127.0.0.1 的静态服务
+│  ├─ server.mjs           # 兜底：Node 版静态服务（package:node 用）
+│  ├─ launcher/Launcher.cs # 双击入口：起服务 + 打开浏览器 + 失败提示窗
+│  └─ stopper/Stopper.cs   # 停止服务
+├─ docs/                   # 交接文档、设计/报告、验收记录、隔离基线
 └─ public/                 # 图标与静态资源
+```
+
+### 便携版结构（方案 A，默认）
+
+```text
+release/日程轻量版便携版/     1.75 MB
+├─ 日程轻量版.exe              双击：起服务并打开浏览器
+├─ 停止服务.exe                关闭后台服务
+├─ ScheduleServer.exe          内置 .NET 静态服务（23 KB，只监听 127.0.0.1）
+├─ 使用说明.txt
+└─ runtime/web/                构建产物（PWA 缓存与 index.html）
 ```
 
 ### 分层铁律
@@ -60,26 +80,21 @@ Work_Lite_version1.0/
 
 ## 数据模型
 
-当前数据库版本 `DB_VERSION = 1`、`SCHEMA_VERSION = 1`，库名 `daily-schedule-lite`。
+当前数据库版本 `DB_VERSION = 2`、`SCHEMA_VERSION = 2`，库名 `daily-schedule-lite`。共 11 张表：8 张基础表 + 3 张长期任务表；`tasks` 自 v2 起增加 `deletedAt`（软删除/回收站）。
 
-已有 8 张表（沿用基础能力）：
-
-| 表           | 主键   | 说明                                  |
-| ------------ | ------ | ------------------------------------- |
-| `tasks`      | `id`   | 普通任务（日程卡片）                  |
-| `projects`   | `id`   | 项目（V1 界面不再暴露入口，数据保留） |
-| `dailyPlans` | `date` | 每日计划                              |
-| `workLogs`   | `id`   | 工作日志（保留，不再作为主界面）      |
-| `reports`    | `id`   | 报告与快照                            |
-| `tags`       | `id`   | 标签                                  |
-| `settings`   | `key`  | 应用设置                              |
-| `meta`       | `key`  | 元信息（最近备份时间等）              |
-
-V2 计划新增 3 张表（本轮只设计，不建表、不改版本）：
-
-- `longTasks`：长期任务主体（标题、描述、备注、优先级、首次计划日、截止日、结束条件、标签、`deletedAt`）。
-- `longTaskRuleVersions`：只追加不可变的规则版本（`taskId + effectiveFrom` 唯一，按日期选版）。
-- `longTaskExceptions`：只追加的单次例外修订链（`taskId + occurrenceDate + revision` 唯一，含 `previousRevisionId`、`baseOccurrence`、`before/after`、`reason`）。
+| 表                     | 主键   | 说明                                                                |
+| ---------------------- | ------ | ------------------------------------------------------------------- |
+| `tasks`                | `id`   | 普通任务（日程行），含 `deletedAt` 软删除标记                       |
+| `projects`             | `id`   | 项目（V1 界面不再暴露入口，数据保留）                               |
+| `dailyPlans`           | `date` | 每日计划                                                            |
+| `workLogs`             | `id`   | 工作日志（保留，不再作为主界面）                                    |
+| `reports`              | `id`   | 报告与快照                                                          |
+| `tags`                 | `id`   | 标签                                                                |
+| `settings`             | `key`  | 应用设置                                                            |
+| `meta`                 | `key`  | 元信息（最近备份时间等）                                            |
+| `longTasks`            | `id`   | 长期任务主体 + `events[]` 生命周期 + `sortOrder` 手动排序           |
+| `longTaskRuleVersions` | `id`   | 只追加不可变的规则版本（`taskId + effectiveFrom` 唯一）             |
+| `longTaskExceptions`   | `id`   | 只追加的单次例外修订链（`taskId + occurrenceDate + revision` 唯一） |
 
 ## 普通任务与长期任务
 
@@ -113,35 +128,34 @@ V2 计划新增 3 张表（本轮只设计，不建表、不改版本）：
 - 每次收工前跑 `npm run isolation:check`：它校验包名、端口、库名、备份格式，扫描旧标识，并比对 `docs/isolation/source-hashes.json` 的源码哈希。若提示 `CHANGED`，说明有外部工具改过源码，需要确认后再重建基线。
 - 端口固定：开发 5180、预览/正式 4180。数据按「浏览器 + 源（含端口）」隔离，换端口等于换一套数据。
 
-## Windows 便携版
+## Windows 便携版（方案 A）
 
-`npm run package:full` 会先构建，再在 `release/` 下生成可直接拷走的便携包：
+默认用「内置 .NET 静态服务」打包：`npm run package:full`，产物在 `release/`：
 
 ```
-日程轻量版便携版/            97 MB（解压后）
+日程轻量版便携版/            约 1.75 MB（压缩后约 0.61 MB）
 ├─ 日程轻量版.exe            双击启动服务并打开浏览器
 ├─ 停止服务.exe              关闭后台服务
-├─ server.mjs                本地静态服务器（只监听 127.0.0.1）
+├─ ScheduleServer.exe        内置静态服务（只监听 127.0.0.1:4180）
 ├─ 使用说明.txt
-└─ runtime/
-   ├─ node.exe               自带运行时，目标机无需安装 Node
-   ├─ start.cmd
-   └─ web/                   构建产物（PWA 缓存同源）
+└─ runtime/web/              构建产物（dist 目录内容）
 ```
 
-- 免安装、不需要管理员权限；整个文件夹拷到任意目录即可用（**不能只复制 exe**）。
+- 目标机只需 **.NET Framework 4.x**（Win10 2004+ / Win11 自带），不需要 Node、不需要管理员权限。
+- 老系统（无 .NET 4.8）用 `npm run package:node` 出一个内置 Node 的版本（约 97 MB），启动器会自动识别两种布局。
 - 端口固定 `4180`：再次双击只复用已启动的服务；`停止服务.exe` 才会真正关闭。
-- 运行状态（pid、日志）写在程序目录的 `state/`；若该目录不可写则退回 `%LOCALAPPDATA%\DailyScheduleLite`。
-- 数据仍在浏览器 IndexedDB 中（按「浏览器 + 源」隔离），关闭服务不会删除数据；换端口或换地址等于换一套数据。
+- 运行状态（pid、日志）写在程序目录的 `state/`；若不可写则退回 `%LOCALAPPDATA%\DailyScheduleLite`。
+- 数据仍在浏览器 IndexedDB 中（按「浏览器 + 源」隔离）；关闭服务不会删除数据，换端口或换地址等于换一套数据。
 - 未签名 exe 可能触发 SmartScreen/杀毒软件提示，选择「仍要运行」即可。
 
 ## 已知限制
 
-- 长期任务与日程已接入双栏界面，但暂无拖拽排序、批量编辑与跨任务搜索。
+- 暂无拖拽排序（长期任务用 ↑/↓ 按钮调整顺序）、批量编辑与跨任务搜索。
 - 报告段落有行数上限（任务 20 / 日志 15 / 项目 10），超出显示「另有 N 项」。
 - 备份为明文 JSON，加密列为 P1。
-- 无端到端自动化测试；离线验收靠 `scripts/offline-check.mjs` 与手工清单。
+- 无端到端自动化测试；浏览器相关行为依赖 `scripts/verify-*.mjs` 与手工清单。
 - 依赖包 antd 体积较大，首屏已按路由懒加载拆分，但仍需在网络较慢时等待。
+- 内置静态服务不含 gzip/ETag/Range（本地回环访问，影响可忽略）。
 
 ## 代码地图
 

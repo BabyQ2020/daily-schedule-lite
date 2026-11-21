@@ -1,0 +1,8 @@
+# 冻结的历史设计与报告：已定稿，不再格式化，避免无意义 diff
+docs/architecture/P3.1_data_layer_v2_final_design.md
+docs/architecture/P3.2_preflight_report.md
+docs/architecture/P3.2_S1_schema_v2_implementation_report.md
+docs/architecture/P3.2_S1.1_closure_report.md
+
+# 救援页是需要逐字节受控的单文件（测试会读其内联脚本），不要重排
+public/tools/rescue-export.html

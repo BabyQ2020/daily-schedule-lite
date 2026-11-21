@@ -21,8 +21,9 @@
     "verify:dist": "node scripts/verify-dist.mjs",
     "verify:offline": "node scripts/offline-check.mjs",
     "verify:rescue": "node scripts/verify-rescue.mjs",
-    "package": "node packaging/build-portable.mjs",
-    "package:full": "npm run build && node packaging/build-portable.mjs"
+    "package": "node packaging/build-portable.mjs --server dotnet",
+    "package:node": "node packaging/build-portable.mjs --server node",
+    "package:full": "npm run build && node packaging/build-portable.mjs --server dotnet"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
